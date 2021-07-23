@@ -1,0 +1,629 @@
+---
+title: "<h1 style='color:white; background:#00b3b3; border:0'><center>CommonLit Readability: start with R (EDA, NLP, LSTM)</center></h1>"
+author: "Maksym Shkliarevskyi"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+        number_sections: true
+        fig_caption: true
+        toc: true
+        fig_width: 12
+        fig_height: 6
+        fig_dpi: 300
+        theme: cosmo
+        highlight: tango
+        code_folding: hide
+---
+
+<img src="https://storage.googleapis.com/kaggle-competitions/kaggle/25914/logos/header.png?t=2021-04-01-15-58-06">
+
+# Competition main information
+
+Can machine learning identify the appropriate reading level of a passage of text, and help inspire learning? Reading is an essential skill for academic success. When students have access to engaging passages offering the right level of challenge, they naturally develop reading skills.
+
+Currently, most educational texts are matched to readers using traditional readability methods or commercially available formulas. However, each has its issues. Tools like Flesch-Kincaid Grade Level are based on weak proxies of text decoding (i.e., characters or syllables per word) and syntactic complexity (i.e., number or words per sentence). As a result, they lack construct and theoretical validity. At the same time, commercially available formulas, such as Lexile, can be cost-prohibitive, lack suitable validation studies, and suffer from transparency issues when the formula's features aren't publicly available.
+
+CommonLit, Inc., is a nonprofit education technology organization serving over 20 million teachers and students with free digital reading and writing lessons for grades 3-12. Together with Georgia State University, an R1 public research university in Atlanta, they are challenging Kagglers to improve readability rating methods.
+
+**I am grateful to [Heads or Tails](https://www.kaggle.com/headsortails) for his amazing works that inspire me not to leave R.**
+
+# Load libraries
+At first, we will load all necessary libraries and set a custom theme for plots.
+
+```{r message = FALSE, echo = FALSE}
+install.packages("ggtext", repos = "http://cran.r-project.org", dependencies = TRUE, quiet = TRUE)
+```
+
+```{r message = FALSE, error = FALSE, warning = FALSE}
+library(tidyverse)
+library(patchwork)
+library(ggwordcloud)
+library(tidytext)
+library(ggtext)
+library(sentimentr)
+library(tokenizers)
+library(stopwords)
+
+# For modeling
+library(tidyverse)
+library(keras)
+library(tensorflow)
+library(Metrics)
+library(caret)
+
+theme_set(theme_minimal())
+my_theme <- theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 18),
+        plot.subtitle = element_text(hjust = 0.5, size = 13),
+        axis.title = element_text(face = 'bold', size = 15),
+        axis.text = element_text(size = 13))
+```
+
+# Load data
+## Train data
+```{r message=FALSE}
+train <- read_csv('../input/commonlitreadabilityprize/train.csv')
+train
+```
+```{r message=FALSE}
+summary(train)
+```
+
+## Test data
+```{r message=FALSE}
+test <- read_csv('../input/commonlitreadabilityprize/test.csv')
+test
+```
+```{r message=FALSE}
+summary(test)
+```
+
+# EDA
+In this competition, we're predicting the reading ease of excerpts from literature. We've provided excerpts from several time periods and a wide range of reading ease scores. Note that the test set includes a slightly larger proportion of modern texts (the type of texts we want to generalize to) than the training set.
+
+Also note that while licensing information is provided for the public test set (because the associated excerpts are available for display / use), the hidden private test set includes only blank license / legal information.
+
+**We start our EDA from the 'target' variable. Next, we'll look at excerpts' sources and then will make NLP analysis for the main variable - 'excerpt'.**
+
+## Target variable
+
+```{r}
+p1 <- train %>% 
+  count(license) %>% 
+  ggplot(aes(n, reorder(license, n))) +
+  geom_col(fill = '#00b3b3') +
+  geom_label(aes(label = n)) + 
+  labs(x = 'Count',
+       y = 'License',
+       subtitle = '"train.csv"') +
+  my_theme
+
+p2 <- test %>% 
+  count(license) %>% 
+  ggplot(aes(n, reorder(license, n))) +
+  geom_col(fill = '#00b3b3') +
+  geom_label(aes(label = n)) + 
+  labs(x = 'Count',
+       y = 'License',
+       subtitle = '"test.csv"') +
+  my_theme
+
+annot = theme(plot.title = element_text(hjust = 0.6, face = 'bold', size = 17))
+p1 + p2 + plot_layout(design = 'AAABB') + plot_annotation(title = 'License frequency', 
+                                                          theme = annot)
+```
+
+Let's look at the 'target' and 'standard_error' variables distributions.
+
+```{r}
+p1 <- train %>% 
+  ggplot(aes(target)) +
+  geom_density(fill = '#00b3b3', size = 1) +
+  geom_vline(aes(xintercept = mean(train$target)), col = 'red', 
+             size = 1.5, linetype = 2) +
+  geom_label(aes(x = mean(train$target), y = 0.4,
+                 label = paste0('Mean: ', round(mean(train$target), 3))),
+             col = 'red', size = 5.5) +
+  labs(x = '',
+       y = 'Density',
+       title = 'Target',
+       subtitle = '"train.csv"') +
+  my_theme
+
+mean <- round(mean(train$standard_error), 3)
+median <- round(median(train$standard_error), 3)
+p2 <- train %>% 
+  ggplot(aes(standard_error)) +
+  geom_density(fill = '#00b3b3', size = 1) +
+  geom_vline(aes(xintercept = mean), col = 'red', 
+             size = 1.5, linetype = 2) +
+  geom_vline(aes(xintercept = median), col = 'blue', 
+             size = 1.5, linetype = 2) +
+  geom_label(aes(x = mean + 0.1, y = 17,
+                 label = paste0('Mean: ', mean)),
+             col = 'red', size = 5.5) +
+  geom_label(aes(x = median - 0.11, y = 17,
+                 label = paste0('Median: ', median)),
+             col = 'blue', size = 5.5) +
+  labs(x = '',
+       y = '',
+       title = 'Standard error',
+       subtitle = '"train.csv"') +
+  my_theme
+
+p3 <- train %>% 
+  ggplot(aes(x = target)) + 
+  geom_boxplot(fill = '#00b3b3', size = 1) +
+  labs(x = '') +
+  theme(axis.text = element_blank())
+
+p4 <- train %>% 
+  ggplot(aes(x = standard_error)) + 
+  geom_boxplot(fill = '#00b3b3', size = 1) +
+  labs(x = '') +
+  theme(axis.text = element_blank())
+
+design <- 'AABB
+AABB
+AABB
+AABB
+CCDD'
+
+p1 + p2 + p3 + p4 + plot_layout(design = design)
+```
+
+Also, let's take a look at the target distribution by license.
+
+```{r message=FALSE, warning=FALSE}
+train %>% 
+  mutate(license = str_replace_all(license, ' ', '_')) %>% 
+  mutate(license = str_replace_na(license, 'None')) %>% 
+  ggplot(aes(target)) +
+  geom_density(fill = '#00b3b3', size = 1) +
+  facet_wrap(~ license) +
+  labs(x = '',
+       y = 'Density',
+       title = 'Target distribution by license',
+       subtitle = '"train.csv"') +
+  my_theme
+```
+
+Nothing interesting. The 'target' variable has a normal distribution and hasn't any differences by license. And what about the relationship between target and standard_error?
+
+```{r}
+train %>% 
+  mutate(col = if_else(target+standard_error == 0, 'red', '#00b3b3')) %>% 
+  ggplot(aes(target, standard_error, fill = col)) +
+  geom_point(alpha = 0.5, shape = 21, color = 'black', size = 5) +
+  scale_fill_identity() +
+  annotate(geom = "curve", xend = -0.05, y = 0.2, x = -1, yend = 0.02, 
+           curvature = -0.2, arrow = arrow(length = unit(2.5, "mm")),
+           size = 1) +
+  annotate("text", x = -1.5, y = 0.22, label = "Interesting point", size = 5) +
+  labs(x = 'Target',
+       y = 'Standard error',
+       title = 'Relationship between "target" and "standard error"',
+       subtitle = '"train.csv"') +
+  my_theme
+```
+
+It looks logical. More complex texts have a larger standard error. One point looks pretty interesting.
+
+## The most common sources of excerpts
+
+Just for interesting, let's look at the most common sources of excerpts.
+
+```{r}
+sources <- unlist(lapply(str_split(train$url_legal, '/'), function(x) x[3]))
+sources <- sources[!is.na(sources)]
+
+p1 <- tibble(sources) %>% 
+  count(sources) %>% 
+  ggplot(aes(n, reorder(sources, n))) +
+  geom_col(fill = '#00b3b3') +
+  geom_label(aes(label = n)) + 
+  labs(x = 'Count',
+       y = '',
+       title = 'Sources',
+       subtitle = '"train.csv"') +
+  my_theme
+
+p2 <- tibble(sources) %>% 
+  count(sources) %>% 
+  ggplot(aes(label = sources, size = n, col = n)) +
+  geom_text_wordcloud(seed = 2021) +
+  scale_size_area(max_size = 13) +
+  scale_color_viridis_c(begin = 0.2, end = 0.5)
+
+p1 <- p1 + inset_element(p2, 0.2, -0.2, 1, 1)
+p1
+```
+
+## Excerpts
+
+Now, we should look at our main variable - 'excerpt'. It's interesting to look at the excerpt length distribution and word frequency.
+
+```{r}
+p1 <- train %>% 
+  mutate(len = str_length(excerpt)) %>% 
+  ggplot(aes(len)) +
+  geom_density(fill = '#00b3b3', size = 1) +
+  labs(x = '',
+       y = 'Density',
+       title = 'Excerpt length distribution',
+       subtitle = '"train.csv"') +
+  my_theme
+
+p2 <- train %>% 
+  mutate(len = str_length(excerpt)) %>% 
+  ggplot(aes(len)) +
+  geom_boxplot(fill = '#00b3b3', size = 1) +
+  labs(x = '') +
+  theme(axis.text = element_blank())
+  
+p3 <- train %>% 
+  select(excerpt) %>% 
+  mutate(len = str_length(excerpt)) %>% 
+  unnest_tokens(word, excerpt) %>% 
+  anti_join(stop_words, by = 'word') %>% 
+  select(word) %>% 
+  count(word, sort = T) %>% 
+  head(50) %>% 
+  ggplot(aes(label = word, size = n, col = n)) +
+  geom_text_wordcloud(seed = 2021) +
+  scale_size_area(max_size = 15) +
+  scale_colour_viridis_c() +
+  labs(title = 'Most common words',
+       subtitle = '"train.csv"') +
+  my_theme
+
+design <- 'AACCCC
+AACCCC
+AACCCC
+BBCCCC'
+
+p1 + p2 + p3 + plot_layout(design = design)
+```
+
+```{r}
+bi <- tibble(bigrams = unlist(tokenize_ngrams(train$excerpt, n = 2, 
+                              stopwords = stopwords("en")))) %>% 
+  count(bigrams, sort = T)
+
+tri <- tibble(trigrams = unlist(tokenize_ngrams(train$excerpt, n = 3, 
+                              stopwords = stopwords("en")))) %>% 
+  count(trigrams, sort = T)
+
+p1 <- bi %>% 
+  slice(1:10) %>% 
+  mutate(col = if_else(n == max(n), '#00b3b3', 'gray50')) %>% 
+  ggplot(aes(n, reorder(bigrams, n), fill = col)) +
+  geom_col() +
+  scale_fill_identity() +
+  labs(x = '',
+       y = 'Bigrams',
+       title = 'TOP Bigrams',
+       subtitle = '"train.csv"') +
+  my_theme
+
+p2 <- tri %>% 
+  slice(1:10) %>% 
+  mutate(col = if_else(n == max(n), '#00b3b3', 'gray50')) %>% 
+  ggplot(aes(n, reorder(trigrams, n), fill = col)) +
+  geom_col() +
+  scale_fill_identity() +
+  labs(x = '',
+       y = 'Trigrams',
+       title = 'TOP Trigrams',
+       subtitle = '"train.csv"') +
+  my_theme
+
+p1 + p2
+```
+
+```{r}
+p1 <- test %>% 
+  mutate(len = str_length(excerpt)) %>% 
+  ggplot(aes(len)) +
+  geom_density(fill = '#00b3b3', size = 1) +
+  labs(x = '',
+       y = 'Density',
+       title = 'Excerpt length distribution',
+       subtitle = '"test.csv"') +
+  my_theme
+
+p2 <- test %>% 
+  mutate(len = str_length(excerpt)) %>% 
+  ggplot(aes(len)) +
+  geom_boxplot(fill = '#00b3b3', size = 1) +
+  labs(x = '') +
+  theme(axis.text = element_blank())
+  
+p3 <- test %>% 
+  select(excerpt) %>% 
+  mutate(len = str_length(excerpt)) %>% 
+  unnest_tokens(word, excerpt) %>% 
+  anti_join(stop_words, by = 'word') %>% 
+  select(word) %>% 
+  count(word, sort = T) %>% 
+  head(50) %>% 
+  ggplot(aes(label = word, size = n, col = n)) +
+  geom_text_wordcloud(seed = 2021) +
+  scale_size_area(max_size = 15) +
+  scale_colour_viridis_c() +
+  labs(title = 'Most common words',
+       subtitle = '"test.csv"') +
+  my_theme
+
+design <- 'AACCCC
+AACCCC
+AACCCC
+BBCCCC'
+
+p1 + p2 + p3 + plot_layout(design = design)
+```
+
+```{r}
+bi <- tibble(bigrams = unlist(tokenize_ngrams(test$excerpt, n = 2, 
+                              stopwords = stopwords("en")))) %>% 
+  count(bigrams, sort = T)
+
+tri <- tibble(trigrams = unlist(tokenize_ngrams(test$excerpt, n = 3, 
+                              stopwords = stopwords("en")))) %>% 
+  count(trigrams, sort = T)
+
+p1 <- bi %>% 
+  slice(1:10) %>% 
+  mutate(col = if_else(n == max(n), '#00b3b3', 'gray50')) %>% 
+  ggplot(aes(n, reorder(bigrams, n), fill = col)) +
+  geom_col() +
+  scale_fill_identity() +
+  labs(x = '',
+       y = 'Bigrams',
+       title = 'TOP Bigrams',
+       subtitle = '"test.csv"') +
+  my_theme
+
+p2 <- tri %>% 
+  slice(1:10) %>% 
+  mutate(col = if_else(n == max(n), '#00b3b3', 'gray50')) %>% 
+  ggplot(aes(n, reorder(trigrams, n), fill = col)) +
+  geom_col() +
+  scale_fill_identity() +
+  labs(x = '',
+       y = 'Trigrams',
+       title = 'TOP Trigrams',
+       subtitle = '"test.csv"') +
+  my_theme
+
+p1 + p2
+```
+
+## Excerpts sentiment analysis
+
+Next, let's do a simple sentiment analysis. For this, we use the [sentimentr](https://cran.r-project.org/web/packages/sentimentr/index.html) library.
+
+```{r}
+train$sentiment <- unlist(lapply(train$excerpt, function(x) mean(sentiment(x)$sentiment)))
+
+p1 <- train %>% 
+  ggplot(aes(sentiment)) +
+  geom_density(fill = '#00b3b3', size = 1) +
+  labs(x = 'Sentiment',
+       y = 'Density',
+       title = 'Sentiment Analysis',
+       subtitle = '"train.csv"') +
+  my_theme
+
+most_neg <- which(train$sentiment == min(train$sentiment))
+most_pos <- which(train$sentiment == max(train$sentiment))
+
+p2 <- ggplot() +
+  geom_textbox(aes(x = 0, y = 0, label = train$excerpt[most_pos]), 
+               width = unit(1, "npc"), height = unit(1, "npc"), 
+               size = 4, fill = '#66ff99') +
+  labs(x = '', y = '',
+       title = paste0('The most positive excerpt (', round(max(train$sentiment), 2), ')')) +
+  my_theme +
+  theme(axis.text = element_blank())
+
+p3 <- ggplot() +
+  geom_textbox(aes(x = 0, y = 0, label = train$excerpt[most_neg]), 
+               width = unit(1, "npc"), height = unit(1, "npc"), 
+               size = 4, fill = '#ff8080') +
+  labs(x = '', y = '',
+       title = paste0('The most negative excerpt (', round(min(train$sentiment), 2), ')')) +
+  my_theme +
+  theme(axis.text = element_blank())
+
+design <- 'AABBB
+AABBB
+AACCC
+AACCC'
+
+p1 + p2 + p3 + plot_layout(design = design)
+```
+
+```{r}
+test$sentiment <- unlist(lapply(test$excerpt, function(x) mean(sentiment(x)$sentiment)))
+
+p1 <- test %>% 
+  ggplot(aes(sentiment)) +
+  geom_density(fill = '#00b3b3', size = 1) +
+  labs(x = 'Sentiment',
+       y = 'Density',
+       title = 'Sentiment Analysis',
+       subtitle = '"test.csv"') +
+  my_theme
+
+most_neg <- which(test$sentiment == min(test$sentiment))
+most_pos <- which(test$sentiment == max(test$sentiment))
+
+p2 <- ggplot() +
+  geom_textbox(aes(x = 0, y = 0, label = test$excerpt[most_pos]), 
+               width = unit(1, "npc"), height = unit(1, "npc"), 
+               size = 4, fill = '#66ff99') +
+  labs(x = '', y = '',
+       title = paste0('The most positive excerpt (', round(max(test$sentiment), 2), ')')) +
+  my_theme +
+  theme(axis.text = element_blank())
+
+p3 <- ggplot() +
+  geom_textbox(aes(x = 0, y = 0, label = test$excerpt[most_neg]), 
+               width = unit(1, "npc"), height = unit(1, "npc"), 
+               size = 4, fill = '#ff8080') +
+  labs(x = '', y = '',
+       title = paste0('The most negative excerpt (', round(min(test$sentiment), 2), ')')) +
+  my_theme +
+  theme(axis.text = element_blank())
+
+design <- 'AABBB
+AABBB
+AACCC
+AACCC'
+
+p1 + p2 + p3 + plot_layout(design = design)
+```
+
+# Simple baseline
+
+It's time to write a very simple and quick model that will be our starting point for this competition. We will use an RNN model with two LSTM layers (the second layer will be bidirectional). We will not search for optimal parameters now, we will leave it for later.
+
+The model will be written on Keras. We use the 10000 most common words for tokenizer.
+
+## Data preprocessing
+```{r}
+max_features <- 10000
+tokenizer <- text_tokenizer(num_words = max_features)
+
+tokenizer %>% 
+  fit_text_tokenizer(train$excerpt)
+
+paste0('Document count: ', tokenizer$document_count)
+```
+
+Next step - creating word sequences. At this stage, it is important to look at the distribution of the number of words in our data in order to know what parameters to set our model.
+
+```{r}
+text_seqs <- texts_to_sequences(tokenizer, train$excerpt)
+
+mean <- round(mean(sapply(text_seqs, function(x) length(x))), 0)
+
+tibble(length = sapply(text_seqs, function(x) length(x))) %>%
+    ggplot(aes(length)) +
+    geom_density(fill = '#00b3b3') + 
+    geom_vline(aes(xintercept = mean), col = 'red', 
+               size = 1.5, linetype = 2) +
+    geom_label(aes(x = mean, y = 0.022,
+               label = paste0('Mean: ', mean)),
+               col = 'red', size = 5.5) +
+    labs(x = '',
+         y = 'Density',
+         title = 'Number of words in excerpts',
+         subtitle = '"train.csv"') +
+    my_theme
+```
+
+Excellent! The maximum number of words in our excerpts is 200. This is not that many, so we can set the maximum value.
+
+```{r}
+# Set model parameters
+MAXLEN <- 200
+BATCH_SIZE <- 32
+EMBED_DIMS <- 50
+EPOCHS <- 5
+```
+
+Now, let's split our data into train and valid datasets. We'll use 'createDataPartition' from the **caret** library.
+
+```{r}
+X_train <- text_seqs %>%
+  pad_sequences(maxlen = MAXLEN)
+y_train <- train$target
+
+set.seed(2021)
+intrain <- createDataPartition(y_train, p = 0.8, list = FALSE)
+X_valid <- X_train[-intrain, ]
+y_valid <- y_train[-intrain]
+X_train <- X_train[intrain, ]
+y_train <- y_train[intrain]
+```
+
+## Modeling
+
+It's time for our model!
+
+```{r}
+model <- keras_model_sequential() %>% 
+  layer_embedding(max_features, EMBED_DIMS, input_length = MAXLEN) %>%
+  layer_lstm(units = MAXLEN, return_sequences = TRUE) %>%
+  bidirectional(layer_lstm(units = MAXLEN)) %>%
+  layer_dense(32, activation = 'relu') %>%
+  layer_dense(1)
+
+model %>% compile(
+  loss = "mean_squared_error",
+  optimizer = "rmsprop"
+)
+
+model %>% summary()
+```
+
+```{r}
+history <- model %>%
+  fit(X_train,
+      y_train,
+      batch_size = BATCH_SIZE,
+      epochs = EPOCHS,
+      validation_data = list(X_valid, y_valid))
+
+tibble(epoch = 1:length(history$metrics$loss), loss = history$metrics$loss, 
+       val_loss = history$metrics$val_loss) %>%
+    gather('loss', 'val_loss', key = 'key', value = 'value') %>%
+    ggplot(aes(epoch, value, col = key)) +
+    geom_line(size = 1) +
+    geom_point(size = 5) +
+    labs(x = 'Epoch',
+         y = 'Loss (MSE)',
+         title = 'Training history',
+         subtitle = 'LSTM',
+         col = '') +
+    my_theme
+```
+
+Let's look at the prediction for a validation dataset.
+
+```{r}
+preds <- tibble(preds = predict(model, X_valid),
+                true = y_valid,
+                col = if_else(preds > true, '#ff6666', '#66ccff'))
+
+preds %>%
+    ggplot(aes(true, preds, fill = col)) +
+    geom_point(alpha = 0.8, shape = 21, color = 'black', size = 5) +
+    geom_abline(intercept = 0, slope = 1, col = "black", size = 1.5) +
+    scale_fill_identity() +
+    labs(x = 'True values',
+         y = 'Predicted values',
+         title = paste0('Prediction (RMSE: ', round(rmse(preds$true, preds$preds), 4), ')'),
+         subtitle = 'LSTM') +
+    my_theme
+```
+
+## Test prediction
+
+```{r message=FALSE}
+text_seqs_test <- texts_to_sequences(tokenizer, test$excerpt)
+
+X_test <- text_seqs_test %>%
+  pad_sequences(maxlen = MAXLEN)
+    
+ss <- read_csv('../input/commonlitreadabilityprize/sample_submission.csv') 
+```
+
+```{r}
+ss$target <- predict(model, X_test)[1:nrow(test)]
+write.csv(x = ss, file = "submission.csv", row.names = FALSE)
+ss  
+```
+
+<h1 style='color:white; background:#00b3b3; border:0'><center>WORK IN PROGRESS...</center></h1>
